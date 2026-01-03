@@ -3,15 +3,33 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Auth\Access\AuthorizationException;
 
 class AuditLog extends Model
 {
     public $timestamps = true;
-    protected $guarded = ['id'];
 
-    public static function booted()
+    protected $guarded = ['id'];
+    protected $fillable = [
+        'user_id',
+        'action',
+        'ip_address',
+        'old_value',
+        'new_value',
+    ];
+    protected $casts = [
+        'old_value' => 'array',
+        'new_value' => 'array',
+    ];
+
+    protected static function booted(): void
     {
-        static::deleting(fn() => abort(403, 'Audit logs are immutable'));
-        static::updating(fn() => abort(403, 'Audit logs are immutable'));
+        static::updating(function ($model) {
+            throw new AuthorizationException('Audit logs are immutable.');
+        });
+
+        static::deleting(function ($model) {
+            throw new AuthorizationException('Audit logs are immutable.');
+        });
     }
 }

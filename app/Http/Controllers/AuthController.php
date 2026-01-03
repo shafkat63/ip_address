@@ -7,169 +7,171 @@ use App\Models\AuthSession;
 use App\Models\User;
 use App\Services\AuditService;
 use App\Services\JwtService;
+use Exception;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
+use Tymon\JWTAuth\Facades\JWTAuth;
 
 class AuthController extends Controller
 {
-    public function userSession(Request $request)
-    {
-        $tokenId = $request->user()->currentAccessToken()->id;
-
-        return AuditLog::where('user_id', Auth::id())
-            ->where('session_id', $tokenId)
-            ->get();
-    }
-    public function refresh(Request $request)
-    {
-        $request->validate(['refresh_token' => 'required']);
-
-        $payload = JwtService::decode($request->refresh_token);
-
-        $session = AuthSession::where('id', $payload['sid'])
-            ->whereNull('revoked_at')
-            ->firstOrFail();
-
-        if (!hash_equals(
-            $session->refresh_token_hash,
-            hash('sha256', $request->refresh_token)
-        )) {
-            abort(401);
-        }
-
-        $accessToken = JwtService::encode([
-            'sub' => $payload['sub'],
-            'role' => Auth::user()->role,
-            'sid' => $payload['sid'],
-            'iat' => time(),
-            'exp' => time() + 900
-        ]);
-
-        AuditService::log('TOKEN_REFRESH', $request);
-
-        return response()->json(['access_token' => $accessToken]);
-    }
-
 
     public function register(Request $request)
     {
-        $data = $request->validate([
+        $validator = Validator::make($request->all(), [
             'name'     => 'required|string|max:255',
-            'email'    => 'required|email|unique:users',
-            'password' => 'required|min:8',
+            'email'    => 'required|email|unique:users,email',
+            'password' => 'required|string|min:8',
         ]);
 
+        if ($validator->fails()) {
+            return response()->json([
+                'message' => 'Validation failed',
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
         $user = User::create([
-            'name'     => $data['name'],
-            'email'    => $data['email'],
-            'password' => Hash::make($data['password']),
+            'name'     => $request->name,
+            'email'    => $request->email,
+            'password' => Hash::make($request->password),
             'role'     => 'user',
         ]);
 
-        AuditService::log('REGISTER', $request);
+        $token = JWTAuth::fromUser($user);
 
-        return response()->json($user, 201);
+        AuditService::log(
+            'REGISTER',
+            $request,
+            $user->id,
+            old: null,
+            new: [
+                'id'    => $user->id,
+                'name'  => $user->name,
+                'email' => $user->email,
+                'role'  => $user->role,
+            ]
+        );
+
+        return response()->json([
+            'id'    => $user->id,
+            'name'  => $user->name,
+            'email' => $user->email,
+            'role'  => $user->role,
+            'token' => $token,
+        ], 201);
     }
-    // public function login(Request $request)
-    // {
-    //     $request->validate([
-    //         'email' => 'required|email',
-    //         'password' => 'required|string',
-    //     ]);
-
-    //     $credentials = $request->only('email', 'password');
-
-    //     if (!Auth::attempt($credentials)) {
-    //         return response()->json(['message' => 'Invalid credentials'], 401);
-    //     }
-
-    //     $user = Auth::user();
-
-    //     $previousTokens = $user->tokens()->count();
-
-    //     if ($previousTokens > 0) {
-    //         AuditService::log('FORCED_LOGOUT_PREVIOUS', $request);
-
-    //         $user->tokens()->delete();
-    //     }
-
-    //     $token = $user->createToken('access')->plainTextToken;
-
-    //     AuditService::log('LOGIN', $request);
-
-    //     return response()->json([
-    //         'token' => $token,
-    //         'user'  => [
-    //             'id'    => $user->id,
-    //             'name'  => $user->name,
-    //             'email' => $user->email,
-    //             'role'  => $user->role,
-    //         ],
-    //     ]);
-    // }
 
 
     public function login(Request $request)
     {
-        $request->validate([
-            'email' => 'required|email',
-            'password' => 'required'
+        $validator = Validator::make($request->all(), [
+            'email'    => 'required|email',
+            'password' => 'required|string|min:8',
         ]);
 
-        if (!Auth::attempt($request->only('email', 'password'))) {
-            abort(401);
+        if ($validator->fails()) {
+            return response()->json([
+                'message' => 'Validation failed',
+                'errors'  => $validator->errors(),
+            ], 422);
         }
 
-        $user = Auth::user();
+        $user = User::where('email', $request->email)->first();
 
-        // Enforce single session
-        AuthSession::where('user_id', $user->id)
-            ->whereNull('revoked_at')
-            ->update(['revoked_at' => now()]);
+        if (!$user || !Hash::check($request->password, $user->password)) {
+            return response()->json(['message' => 'Invalid credentials'], 401);
+        }
 
-        $sid = (string) Str::uuid();
+        $token = JWTAuth::fromUser($user);
 
-        $accessToken = JwtService::encode([
-            'sub' => $user->id,
-            'role' => $user->role,
-            'sid' => $sid,
-            'iat' => time(),
-            'exp' => time() + 900
-        ]);
-
-        $refreshToken = JwtService::encode([
-            'sub' => $user->id,
-            'sid' => $sid,
-            'iat' => time(),
-            'exp' => time() + 604800
-        ]);
-
-        AuthSession::create([
-            'id' => $sid,
-            'user_id' => $user->id,
-            'refresh_token_hash' => hash('sha256', $refreshToken),
-            'user_agent' => $request->userAgent(),
-            'origin_ip' => $request->ip(),
-            'expires_at' => now()->addDays(7),
-        ]);
-
-        AuditService::log('LOGIN', $request);
+        AuditService::log(
+            'LOGIN',
+            $request,
+            $user->id,
+            old: null,
+            new: [
+                'id'    => $user->id,
+                'name'  => $user->name,
+                'email' => $user->email,
+                'role'  => $user->role,
+            ]
+        );
 
         return response()->json([
-            'access_token' => $accessToken,
-            'refresh_token' => $refreshToken
+            'id'    => $user->id,
+            'name'  => $user->name,
+            'email' => $user->email,
+            'role'  => $user->role,
+            'token' => $token,
         ]);
     }
 
+    public function refresh(Request $request)
+    {
+        try {
+            $token = JWTAuth::parseToken()->refresh();
+
+            $user = JWTAuth::setToken($token)->authenticate();
+
+            return response()->json([
+                'message' => 'Token refreshed successfully',
+                'token'   => $token,
+                'user'    => [
+                    'id'    => $user->id,
+                    'name'  => $user->name,
+                    'email' => $user->email,
+                    'role'  => $user->role,
+                ],
+            ]);
+        } catch (\Tymon\JWTAuth\Exceptions\TokenExpiredException $e) {
+            return response()->json(['message' => 'Token has expired'], 401);
+        } catch (\Tymon\JWTAuth\Exceptions\JWTException $e) {
+            return response()->json(['message' => 'Token refresh failed'], 401);
+        }
+    }
+
+
     public function logout(Request $request)
     {
-        AuthSession::where('id', $request->attributes->get('session_id'))
-            ->update(['revoked_at' => now()]);
+        try {
+            $user = auth('api')->user();
 
-        AuditService::log('LOGOUT', $request);
+            if (!$user) {
+                return response()->json([
+                    'errorCode' => 401,
+                    'errorMessage' => 'User already logged out or session invalid'
+                ], 200);
+            }
 
-        return response()->noContent();
+            // Log audit
+            AuditService::log('LOGOUT', $request, $user->id, null, [
+                'id' => $user->id,
+                'email' => $user->email,
+            ]);
+
+            JWTAuth::parseToken()->invalidate();
+
+            return response()->json([
+                'errorCode' => 0, // 0 usually indicates success in this pattern
+                'errorMessage' => 'Successfully logged out'
+            ], 200);
+        } catch (Exception $e) {
+            return response()->json([
+                'errorCode' => 500,
+                'errorMessage' => 'Logout error: ' . $e->getMessage()
+            ], 200);
+        }
+    }
+
+    public function userSession(Request $request)
+    {
+        $sessionId = $request->attributes->get('session_id');
+
+        return AuditLog::where('user_id', Auth::id())
+            ->where('session_id', $sessionId)
+            ->get();
     }
 }

@@ -2,41 +2,47 @@
 
 namespace App\Http\Middleware;
 
-use App\Models\AuthSession;
-use App\Models\User;
-use App\Services\JwtService;
 use Closure;
+use Exception;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
+use Symfony\Component\HttpFoundation\Response;
+use Tymon\JWTAuth\Facades\JWTAuth;
+use Tymon\JWTAuth\Exceptions\JWTException;
 
-class JwtAuth
+class JwtMiddleware
 {
-    public function handle(Request $request, Closure $next)
+    public function handle(Request $request, Closure $next): Response
     {
-        $token = $request->bearerToken();
-        if (!$token) {
-            abort(401, 'Missing token');
-        }
-
         try {
-            $payload = JwtService::decode($token);
-        } catch (\Exception $e) {
-            abort(401, $e->getMessage());
+            if (!$request->hasHeader('Authorization')) {
+                return response()->json([
+                    'errorCode' => 401,
+                    'errorMessage' => 'Authorization header not found'
+                ], 200);
+            }
+            $user = JWTAuth::parseToken()->authenticate();
+
+            if (!$user) {
+                return response()->json([
+                    'errorCode' => 404,
+                    'errorMessage' => 'User not found'
+                ], 200);
+            }
+        } catch (Exception $e) {
+            $message = 'Token Invalid';
+            if ($e instanceof \Tymon\JWTAuth\Exceptions\TokenExpiredException) {
+                $message = 'Token Expired';
+            } elseif ($e instanceof \Tymon\JWTAuth\Exceptions\TokenInvalidException) {
+                $message = 'Token Invalid';
+            } else {
+                $message = 'Authentication Error: ' . $e->getMessage();
+            }
+
+            return response()->json([
+                'errorCode' => 401,
+                'errorMessage' => $message
+            ], 200); // Forced success status
         }
-
-        $session = AuthSession::where('id', $payload['sid'])
-            ->whereNull('revoked_at')
-            ->first();
-
-        if (!$session) {
-            abort(401, 'Session revoked');
-        }
-
-        $user = User::findOrFail($payload['sub']);
-        Auth::setUser($user);
-
-        // make session id available everywhere
-        $request->attributes->set('session_id', $payload['sid']);
 
         return $next($request);
     }

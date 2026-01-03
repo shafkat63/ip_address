@@ -4,8 +4,21 @@ namespace App\Services;
 
 class JwtService
 {
-    public static function encode(array $payload): string
+    /**
+     * Encode a payload into a JWT
+     */
+    public static function encode(array $payload, int $ttl = 3600): string
     {
+        // Add expiration if not set
+        if (!isset($payload['exp'])) {
+            $payload['exp'] = time() + $ttl;
+        }
+
+        // Add unique session ID if not set
+        if (!isset($payload['jti'])) {
+            $payload['jti'] = uniqid('', true);
+        }
+
         $header = base64_encode(json_encode([
             'alg' => 'HS256',
             'typ' => 'JWT'
@@ -23,6 +36,9 @@ class JwtService
         return "$header.$payload." . base64_encode($signature);
     }
 
+    /**
+     * Decode a JWT and return the payload
+     */
     public static function decode(string $jwt): array
     {
         [$header, $payload, $signature] = explode('.', $jwt);
@@ -42,8 +58,9 @@ class JwtService
 
         $data = json_decode(base64_decode($payload), true);
 
-        if ($data['exp'] < time()) {
-            throw new \Exception('Token expired');
+        // Optional: treat missing exp as invalid
+        if (!isset($data['exp']) || $data['exp'] < time()) {
+            throw new \Exception('Token expired or missing exp');
         }
 
         return $data;
